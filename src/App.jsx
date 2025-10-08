@@ -193,7 +193,7 @@ export default function App() {
   const totalNeeded = SLOT_KEYS.reduce((acc, k) => acc + slots[k], 0);
 
   const bump = (k, d) => {
-    const max = k === "D" ? 6 : k === "G" ? 3 : 3;
+    const max = k === "D" ? 8 : k === "G" ? 3 : 4;
     const v = Math.max(0, Math.min(max, slots[k] + d));
     const next = { ...slots, [k]: v };
     setSlots(next);
@@ -370,7 +370,7 @@ export default function App() {
                         className="progressFill"
                         style={{
                           width: `${
-                            (slots[k] / (k === "D" ? 7 : k === "G" ? 3 : 4)) *
+                            (slots[k] / (k === "D" ? 8 : k === "G" ? 3 : 4)) *
                             100
                           }%`,
                         }}
