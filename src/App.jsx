@@ -370,7 +370,7 @@ export default function App() {
                         className="progressFill"
                         style={{
                           width: `${
-                            (slots[k] / (k === "D" ? 6 : k === "G" ? 3 : 3)) *
+                            (slots[k] / (k === "D" ? 7 : k === "G" ? 3 : 4)) *
                             100
                           }%`,
                         }}

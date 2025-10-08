@@ -142,14 +142,6 @@ body {
   }
 }
 
-/* NEW: Games strip across the top */
-.gamesStrip {
-  display: flex;
-  gap: 12px;
-  overflow-x: auto;
-  padding: 4px 2px 10px;
-  scrollbar-width: thin;
-}
 .gameCard {
   flex: 0 0 auto;
   min-width: 180px;
@@ -212,15 +204,22 @@ body {
   border-radius: 6px;
   padding: 0 6px;
 }
-/* Base (no fade at start) */
+
 .gamesStrip {
   position: relative;
   display: flex;
   gap: 12px;
   overflow-x: auto;
+  overflow-y: hidden; /* ensure no vertical bar ever shows */
   padding: 4px 2px 10px;
-  scrollbar-width: thin;
+  scroll-behavior: smooth;
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge legacy */
   transition: mask-image 0.25s ease, -webkit-mask-image 0.25s ease;
+}
+
+.gamesStrip::-webkit-scrollbar {
+  display: none; /* Chrome, Safari */
 }
 
 /* Add fade once scrolled (left edge appears when first card has moved left) */
