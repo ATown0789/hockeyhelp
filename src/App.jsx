@@ -1,7 +1,8 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import NHL_SCHEDULE from "./data/schedule";
 import { useFPMap } from "./fp-map";
 import SettingsPanel from "./SettingsPanel";
+import GameStrip from "./GameStrip";
 
 const DEFAULT_SLOTS = { C: 2, LW: 2, RW: 2, D: 4, G: 2, UTIL: 2 };
 const SLOT_KEYS = ["C", "LW", "RW", "D", "G", "UTIL"];
@@ -132,30 +133,45 @@ export default function App() {
     }
   });
 
-  const [rosterText, setRosterText] = useState(
-    [
-      "Brayden Point,TBL,C",
-      "Jack Hughes,NJ,C/LW",
-      "Carter Verhaeghe,FLA,LW",
-      "Andrei Svechnikov,CAR,LW/RW",
-      "David Pastrnak,BOS,RW",
-      "Mika Zibanejad,NYR,C/RW",
-      "Moritz Seider,DET,D",
-      "Rasmus Dahlin,BUF,D",
-      "Adam Fox,NYR,D",
-      "Darnell Nurse,EDM,D",
-      "Nazem Kadri,CGY,C",
-      "Alexis Lafreniere,NYR,LW/RW",
-      "Alex DeBrincat,DET,LW/RW",
-      "Aaron Ekblad,FLA,D",
-      "Dylan Cozens,BUF,C",
-      "Nikita Zadorov,BOS,D",
-      "Jeremy Lauzon,VGK,D",
-      "Dustin Wolf,CGY,G",
-      "Stuart Skinner,EDM,G",
-      "Linus Ullmark,OTT,G",
-    ].join("\n")
-  );
+  // Built-in default roster (used only if nothing saved yet)
+  const BUILT_IN_ROSTER = [
+    "Brayden Point,TBL,C",
+    "Jack Hughes,NJ,C/LW",
+    "Carter Verhaeghe,FLA,LW",
+    "Andrei Svechnikov,CAR,LW/RW",
+    "David Pastrnak,BOS,RW",
+    "Mika Zibanejad,NYR,C/RW",
+    "Moritz Seider,DET,D",
+    "Rasmus Dahlin,BUF,D",
+    "Adam Fox,NYR,D",
+    "Darnell Nurse,EDM,D",
+    "Nazem Kadri,CGY,C",
+    "Alexis Lafreniere,NYR,LW/RW",
+    "Alex DeBrincat,DET,LW/RW",
+    "Aaron Ekblad,FLA,D",
+    "Dylan Cozens,BUF,C",
+    "Nikita Zadorov,BOS,D",
+    "Jeremy Lauzon,VGK,D",
+    "Dustin Wolf,CGY,G",
+    "Stuart Skinner,EDM,G",
+    "Linus Ullmark,OTT,G",
+  ].join("\n");
+
+  // Load once from localStorage (fallback to built-in)
+  const [rosterText, setRosterText] = useState(() => {
+    try {
+      return localStorage.getItem("userRoster") || BUILT_IN_ROSTER;
+    } catch {
+      return BUILT_IN_ROSTER;
+    }
+  });
+
+  // Persist roster changes automatically
+  useEffect(() => {
+    try {
+      localStorage.setItem("userRoster", rosterText);
+    } catch {}
+  }, [rosterText]);
 
   const parsed = useMemo(
     () => parseRosterText(rosterText, FP_MAP),
@@ -272,11 +288,11 @@ export default function App() {
       )}
 
       {/* Games strip across the top */}
-      <div className="gamesStrip">
-        {normGames.length === 0 ? (
-          <div className="gameCard muted">No games listed.</div>
-        ) : (
-          normGames.map((g, i) => (
+      {normGames.length === 0 ? (
+        <div className="gameCard muted">No games listed.</div>
+      ) : (
+        <GameStrip>
+          {normGames.map((g, i) => (
             <div className="gameCard" key={i}>
               <div className="gameTeams">
                 <span
@@ -295,7 +311,6 @@ export default function App() {
                   {g.home}
                 </span>
               </div>
-
               {g.startCT ? (
                 <div className="gameTime">{timeOnlyCT(g.startCT)}</div>
               ) : null}
@@ -303,9 +318,9 @@ export default function App() {
                 <div className="gameNet">{g.broadcasters.join(", ")}</div>
               ) : null}
             </div>
-          ))
-        )}
-      </div>
+          ))}
+        </GameStrip>
+      )}
 
       <div className="grid">
         {/* Left column */}
@@ -397,7 +412,7 @@ export default function App() {
 
         {/* Right column */}
         <div style={{ display: "grid", gap: 16 }}>
-          <section className="card">
+          <section className="card sectionStarters">
             <div className="cardTitle">Starters</div>
             {SLOT_KEYS.map((k) => (
               <div key={k} style={{ marginBottom: 12 }}>
@@ -440,7 +455,7 @@ export default function App() {
             ))}
           </section>
 
-          <section className="card">
+          <section className="card sectionBench">
             <div className="cardTitle">Bench (playing but extra)</div>
             {result.bench.length === 0 ? (
               <div className="muted">No extras today.</div>
@@ -467,7 +482,7 @@ export default function App() {
             )}
           </section>
 
-          <section className="card">
+          <section className="card sectionNoGame">
             <div className="cardTitle">No Game</div>
             {result.notPlaying.length === 0 ? (
               <div className="muted">Everyone plays — nice!</div>

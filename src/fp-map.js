@@ -9,6 +9,7 @@ const STD_MODE = "sample"; // or "population" for STDEV.P
 /** ===== Stat semantics ===== */
 // Goalies with “lower is better” in Categories:
 const NEG_GOALIE = new Set(["GA", "GAA", "L"]);
+
 const SKATER_ADJ = new Set([
   "G",
   "A",
@@ -21,6 +22,9 @@ const SKATER_ADJ = new Set([
 ]);
 const GOALIE_ADJ = new Set(["W", "L", "SV", "GA", "SV%", "GAA"]);
 
+// Stats that are rates. Never multiply these by ADJ directly.
+const RATE_STATS = new Set(["SV%", "GAA", "FO%"]);
+
 /** ===== Helpers ===== */
 function keyName(name) {
   return String(name || "")
@@ -31,7 +35,6 @@ function keyName(name) {
 }
 
 function readProjectedGP(row) {
-  // Try a few common keys (case/variant tolerant)
   const candidates = [
     "GP",
     "Gp",
@@ -43,7 +46,7 @@ function readProjectedGP(row) {
   for (const k of candidates) {
     if (k in row) {
       const v = Number(row[k]);
-      if (Number.isFinite(v) && v > 0) return v; // allow decimals like 79.895
+      if (Number.isFinite(v) && v > 0) return v;
     }
   }
   return NaN;
@@ -52,7 +55,7 @@ function readProjectedGP(row) {
 function effectiveGP(row, useProjectedGP) {
   if (useProjectedGP) {
     const gp = readProjectedGP(row);
-    if (Number.isFinite(gp)) return gp; // only fall back if missing/NaN
+    if (Number.isFinite(gp)) return gp;
   }
   return 82;
 }
@@ -72,18 +75,23 @@ function stableStatsSample(vals) {
   return { mean, sd: Math.sqrt(variance) };
 }
 
-function adjFor(row) {
-  const a = Number(row.ADJ);
-  return Number.isFinite(a) && a > 0 ? a : 1;
-}
+// z-scored weighted sum helper (works for skaters & goalies)
+function zSum(totals, keys, weights, tables, negSet) {
+  let s = 0;
+  for (const k of keys) {
+    const w = Number(weights[k] ?? 0);
+    if (!w) continue;
 
-function applyAdj(row, stat, val) {
-  if (!Number.isFinite(val)) return NaN;
-  // Only multiply the whitelisted stats
-  if (SKATER_ADJ.has(stat) || GOALIE_ADJ.has(stat)) {
-    return val * adjFor(row);
+    const x = Number(totals[k]);
+    if (!Number.isFinite(x)) continue;
+
+    const mu = Number(tables.means[k] ?? 0);
+    const sd = Number(tables.stds[k] ?? 0);
+    const z = sd > 0 ? (x - mu) / sd : 0;
+
+    s += w * (negSet && negSet.has(k) ? -z : z);
   }
-  return val;
+  return s;
 }
 
 function buildZTablesFromTotals(totalsList, keys) {
@@ -91,12 +99,24 @@ function buildZTablesFromTotals(totalsList, keys) {
     stds = {};
   for (const k of keys) {
     const vals = totalsList.map((t) => t[k]).filter(Number.isFinite);
-
     const { mean, sd } = stableStatsSample(vals);
     means[k] = mean;
     stds[k] = sd || 0;
   }
   return { means, stds };
+}
+
+function adjFor(row) {
+  const a = Number(row.ADJ);
+  return Number.isFinite(a) && a > 0 ? a : 1;
+}
+
+// Apply ADJ to counting stats only; never to rate stats.
+function applyAdj(row, stat, val) {
+  if (!Number.isFinite(val)) return NaN;
+  if (RATE_STATS.has(stat)) return val; // no direct ADJ to rates
+  if (SKATER_ADJ.has(stat) || GOALIE_ADJ.has(stat)) return val * adjFor(row);
+  return val;
 }
 
 // --- percentage normalizer (0..1)
@@ -114,75 +134,20 @@ function readPercent01(raw) {
   return Number.isFinite(n) ? (n > 1 ? n / 100 : n) : NaN;
 }
 
-function skSeasonTotal(row, stat, gpEff) {
-  // If Excel baked a total, apply ADJ and return
-  const baked = Number(row[`${stat}_total`]);
-  if (Number.isFinite(baked)) return applyAdj(row, stat, baked);
-
-  // Percent stats pass through (then ADJ if stat is in SKATER_ADJ)
-  if (String(stat).includes("%")) {
-    const rate = readPercent01(row[stat]);
-    return applyAdj(row, stat, rate);
-  }
-
-  // Per-game → season total via effective GP, then ADJ
-  const vpg = readSkaterPerGame(row, stat);
-  if (!Number.isFinite(vpg) || !Number.isFinite(gpEff)) return NaN;
-  return applyAdj(row, stat, vpg * gpEff);
-}
-
-// Optional negSet for categories where lower is better (pass undefined for skaters)
-function zSum(totals, keys, weights, tables, negSet) {
-  let s = 0;
-  for (const k of keys) {
-    const w = Number(weights[k] ?? 0);
-    if (!w) continue;
-
-    const x = totals[k];
-    if (!Number.isFinite(x)) continue;
-
-    const mu = tables.means[k] ?? 0;
-    const sd = tables.stds[k] ?? 0;
-    const z = sd > 0 ? (x - mu) / sd : 0;
-
-    const adj = negSet && negSet.has(k) ? -z : z;
-    s += w * adj;
-  }
-  return s;
-}
-
-/** ===== Goalie helpers kept from your version (unchanged) ===== */
-const GOALIE_ALIASES = {
-  W: { key: "W", rate: false },
-  L: { key: "L", rate: false },
-  OTL: { key: "OTL", rate: false },
-  SO: { key: "SO", rate: false },
-  SV: { key: "SV", rate: false },
-  "SV%": { key: "SV%", rate: true },
-  GA: { key: "GA", rate: false },
-  GS: { key: "GP", rate: false }, // UI “GS” mapped to raw GP total
-  GAA: { key: "GA", rate: true }, // proxy rate via GA/GP behavior handled by z sign
-};
-
-// --- add near GOALIE_ALIASES ---
+/** ---- Skaters helpers ---- */
 const SKATER_ALIASES = {
   G: { keys: ["G"] },
   A: { keys: ["A"] },
-  // If PTS isn't in JSON, derive PTS = G + A (both per-game)
   PTS: {
     derive: (r) => Number(r.PTS ?? (Number(r.G) || 0) + (Number(r.A) || 0)),
   },
-  // SOG sometimes appears as "S"
   SOG: { keys: ["SOG", "S"] },
   PPG: { keys: ["PPG"] },
-  // If PPP missing, derive PPP = PPG + PPA (per-game)
   PPP: {
     derive: (r) => Number(r.PPP ?? (Number(r.PPG) || 0) + (Number(r.PPA) || 0)),
   },
-  // +/- may be stored under alternate keys
   "+/-": { keys: ["+/-", "PlusMinus", "PM"] },
   GWG: { keys: ["GWG"] },
-  // Normalize FO% to 0..1 (rate)
   "FO%": { derive: (r) => readPercent01(r["FO%"]) },
   GP: { keys: ["GP"] },
 };
@@ -206,14 +171,33 @@ function readSkaterPerGame(row, stat) {
   return NaN;
 }
 
-function readGoalieValue_Points(row, stat) {
-  // Map UI -> JSON and handle rates
-  if (stat === "SV%") return readSvPct(row); // rate 0..1
-  if (stat === "GAA") return Number(row.GA); // treat GA/GP rate (your JSON has GA per-game)
-  const alias = GOALIE_ALIASES[stat] || { key: stat };
-  const v = Number(row[alias.key]);
-  return Number.isFinite(v) ? v : NaN;
+// Build skater season total respecting baked totals and ADJ-on-counts
+function skSeasonTotal(row, stat, gpEff) {
+  // If a baked total exists, trust it and DO NOT re-ADJ.
+  const baked = Number(row[`${stat}_total`]);
+  if (Number.isFinite(baked)) return baked;
+
+  // Percent stats pass through (rate); no ADJ directly.
+  if (String(stat).includes("%")) return readPercent01(row[stat]);
+
+  // Per-game → season total via effective GP, then ADJ for allowed stats.
+  const vpg = readSkaterPerGame(row, stat);
+  if (!Number.isFinite(vpg) || !Number.isFinite(gpEff)) return NaN;
+  return applyAdj(row, stat, vpg * gpEff);
 }
+
+/** ---- Goalies helpers ---- */
+const GOALIE_ALIASES = {
+  W: { key: "W", rate: false },
+  L: { key: "L", rate: false },
+  OTL: { key: "OTL", rate: false },
+  SO: { key: "SO", rate: false },
+  SV: { key: "SV", rate: false },
+  "SV%": { key: "SV%", rate: true },
+  GA: { key: "GA", rate: false },
+  GS: { key: "GP", rate: false }, // UI “GS” mapped to raw GP total
+  GAA: { key: "GA", rate: true }, // GA/GP rate
+};
 
 // Read SV% robustly. Accept 0–1, 0–100, or "91.5%". Fallback: SV/(SV+GA).
 function readSvPct(row) {
@@ -232,55 +216,32 @@ function readSvPct(row) {
     if (!Number.isFinite(v)) return NaN;
     return v > 1 ? v / 100 : v;
   }
-  // Fallback ratio
-  const sv = Number(row.SV);
-  const ga = Number(row.GA);
+  const sv = Number(row.SV),
+    ga = Number(row.GA);
   const denom = sv + ga;
-  if (Number.isFinite(sv) && Number.isFinite(ga) && denom > 0) {
+  if (Number.isFinite(sv) && Number.isFinite(ga) && denom > 0)
     return sv / denom;
-  }
   return NaN;
 }
 
 /** ===== Hook ===== */
 export function useFPMap() {
   const { settings } = useSettings();
-  if (typeof window !== "undefined") {
-    window.gpDebug = (name) => {
-      const r =
-        skaters.find(
-          (s) => (s.Player || s.Name || "").toLowerCase() === name.toLowerCase()
-        ) ||
-        goalies.find(
-          (g) => (g.Player || g.Name || "").toLowerCase() === name.toLowerCase()
-        );
-      if (!r) return console.warn("Not found:", name);
-      const proj = readProjectedGP(r);
-      const eff = effectiveGP(r, settings.useProjectedGP);
-      console.log({
-        name: r.Player || r.Name,
-        useProjectedGP: settings.useProjectedGP,
-        projected_GP_from_row: proj,
-        effective_GP_used: eff,
-      });
-    };
-  }
+
   return useMemo(() => {
     const map = Object.create(null);
     const mode = settings.scoringMode;
 
     // =========================
-    // POINTS (unchanged logic)
+    // POINTS
     // =========================
     if (mode === "points") {
-      const RATE_SKATER = new Set(["FO%"]); // skater rates (no GP scaling)
-      const RATE_GOALIE = new Set(["SV%", "GAA"]); // goalie rates (no GP scaling)
-
       function pointsSeasonFP_Skaters(row, weights, gp) {
         let fp = 0;
         for (const stat in weights) {
           const w = Number(weights[stat]);
           if (!w) continue;
+
           if (stat === "GP") {
             if (Number.isFinite(gp)) fp += gp * w;
             continue;
@@ -289,7 +250,8 @@ export function useFPMap() {
           const vpg_or_rate = readSkaterPerGame(row, stat);
           if (!Number.isFinite(vpg_or_rate)) continue;
 
-          const isRate = stat.includes("%"); // (FO% etc.)
+          // Rates (FO%) are NOT ADJ’ed directly; counts are.
+          const isRate = stat.includes("%");
           const base = isRate ? vpg_or_rate : vpg_or_rate * gp;
           fp += applyAdj(row, stat, base) * w;
         }
@@ -298,32 +260,58 @@ export function useFPMap() {
 
       function pointsSeasonFP_Goalies(row, weights, gp) {
         let fp = 0;
+
+        // Precompute adjusted counting totals once
+        const svTot = applyAdj(
+          row,
+          "SV",
+          Number.isFinite(Number(row.SV)) && Number.isFinite(gp)
+            ? Number(row.SV) * gp
+            : NaN
+        );
+        const gaTot = applyAdj(
+          row,
+          "GA",
+          Number.isFinite(Number(row.GA)) && Number.isFinite(gp)
+            ? Number(row.GA) * gp
+            : NaN
+        );
+
         for (const stat in weights) {
           const w = Number(weights[stat]);
           if (!w) continue;
+
           if (stat === "GP") {
             if (Number.isFinite(gp)) fp += gp * w;
             continue;
           }
 
-          // Map UI -> JSON; treat SV% and GAA as rates
-          let raw =
-            stat === "SV%"
-              ? readSvPct(row)
-              : stat === "GAA"
-              ? Number(row.GA)
-              : Number(row[(GOALIE_ALIASES[stat] || { key: stat }).key]);
+          if (stat === "SV%") {
+            // Rebuild rate from ADJ'ed counts (ADJ cancels here; keeps SV% sane)
+            const denom =
+              (Number.isFinite(svTot) ? svTot : 0) +
+              (Number.isFinite(gaTot) ? gaTot : 0);
+            if (denom > 0) fp += (svTot / denom) * w;
+            continue;
+          }
+          if (stat === "GAA") {
+            // GA total is ADJ'ed; divide by GP to get GAA
+            if (Number.isFinite(gaTot) && Number.isFinite(gp) && gp > 0) {
+              fp += (gaTot / gp) * w;
+            }
+            continue;
+          }
 
-          if (!Number.isFinite(raw)) continue;
-
-          const isRate = stat === "SV%" || stat === "GAA";
-          const base = isRate ? raw : raw * gp; // per-game × GP for counting
-          fp += applyAdj(row, stat, base) * w;
+          // Other goalie stats are counting: per-game × GP, then ADJ
+          const vpg = Number(row[(GOALIE_ALIASES[stat] || { key: stat }).key]);
+          if (!Number.isFinite(vpg)) continue;
+          const total = applyAdj(row, stat, vpg * gp);
+          if (Number.isFinite(total)) fp += total * w;
         }
         return fp;
       }
 
-      // Skaters (use projected GP when toggle is on; else 82)
+      // Skaters
       for (const row of skaters) {
         const gp = effectiveGP(row, settings.useProjectedGP);
         const fpSeason = pointsSeasonFP_Skaters(
@@ -368,9 +356,7 @@ export function useFPMap() {
     // CATEGORIES
     // =========================
 
-    // --- SKATERS: per-game × effective GP (82 if not using projected);
-    //              % stats normalized to 0..1 and NOT scaled; ignore GP
-    // ---- Categories: skaters (per-game × effective GP; % pass-through); ignore GP
+    // Skaters: per-game × effective GP (82 or projected), % pass-through; ignore GP
     const skKeys = Object.keys(settings.skaterWeights).filter(
       (k) => (settings.skaterWeights[k] ?? 0) > 0
     );
@@ -379,8 +365,8 @@ export function useFPMap() {
       const gpEff = effectiveGP(r, settings.useProjectedGP);
       const o = {};
       for (const stat of skKeys) {
-        if (stat === "GP") continue; // never a skater category
-        const t = skSeasonTotal(r, stat, gpEff); // ADJ applied inside
+        if (stat === "GP") continue; // GP is not a skater category
+        const t = skSeasonTotal(r, stat, gpEff); // ADJ on counts inside, no ADJ on rates
         if (Number.isFinite(t)) o[stat] = t;
       }
       return o;
@@ -388,77 +374,7 @@ export function useFPMap() {
 
     const skTables = buildZTablesFromTotals(skTotalsList, skKeys);
 
-    if (typeof window !== "undefined") {
-      window.skCatDebug = (name) => {
-        const i = skaters.findIndex(
-          (r) =>
-            (r.Player || r.Name || "").toLowerCase() ===
-            String(name).toLowerCase()
-        );
-        if (i === -1) return console.warn("Skater not found:", name);
-
-        const r = skaters[i];
-        const useProj = !!settings.useProjectedGP; // <-- current toggle
-        const gpEff = effectiveGP(r, useProj); // <-- same logic as production
-        const totG = skSeasonTotal(r, "G", gpEff, true); // <-- applyAdj = true
-
-        const mu = skTables.means.G ?? 0;
-        const sd = skTables.stds.G ?? 0;
-        const z = sd > 0 ? (totG - mu) / sd : 0;
-
-        console.log({
-          name: r.Player || r.Name,
-          useProjectedGP: useProj,
-          gpRaw: r.GP,
-          gpEff,
-          ADJ: r.ADJ,
-          G_pg: r.G,
-          G_total: totG,
-          mean_G: mu,
-          sd_G: sd,
-          z,
-          __ts: Date.now(), // helps confirm you’re seeing the latest function
-        });
-      };
-    }
-
-    // Optional parity probe for Goals:
-    if (skKeys.includes("G")) {
-      const mu = skTables.means.G ?? 0;
-      const sd = skTables.stds.G ?? 0;
-      const n = skTotalsList.reduce(
-        (a, t) => a + (Number.isFinite(t.G) ? 1 : 0),
-        0
-      );
-      console.log(
-        `[Skaters:G] mean=${mu.toFixed(6)} sd=${sd.toFixed(6)} n=${n}`
-      );
-    }
-
-    window.skCatDebug = (name) => {
-      const i = skaters.findIndex(
-        (r) => (r.Player || r.Name || "").toLowerCase() === name.toLowerCase()
-      );
-      if (i === -1) return console.warn("Skater not found");
-      const r = skaters[i];
-      const gp = effectiveGP(r, settings.useProjectedGP);
-      const tot = skSeasonTotal(r, "G", gp, SKATER_ADJ.has("G")); // ← add 4th arg
-      const mu = skTables.means.G ?? 0;
-      const sd = skTables.stds.G ?? 0;
-      const z = sd > 0 ? (tot - mu) / sd : 0;
-      console.log({
-        name: r.Player || r.Name,
-        gp,
-        ADJ: r.ADJ,
-        G_pg: r.G,
-        G_total: tot,
-        mean_G: mu,
-        sd_G: sd,
-        z,
-      });
-    };
-
-    // --- GOALIES: raw JSON with minimal normalization (as discussed)
+    // Goalies: build from raw JSON
     const gKeysUI = Object.keys(settings.goalieWeights).filter(
       (k) => (settings.goalieWeights[k] ?? 0) > 0
     );
@@ -467,32 +383,46 @@ export function useFPMap() {
       const o = {};
       const gpRaw = Number(r.GP) || 0;
 
-      for (const uiStat of gKeysUI) {
-        if (uiStat === "GP" || uiStat === "GS") {
-          // never ADJ on GP/GS
-          if (Number.isFinite(gpRaw)) o[uiStat] = gpRaw;
-          continue;
-        }
+      // Build ADJ’ed counting totals once (per-game -> total -> ADJ)
+      const svTot =
+        Number.isFinite(Number(r.SV)) && gpRaw > 0
+          ? applyAdj(r, "SV", Number(r.SV) * gpRaw)
+          : NaN;
+      const gaTot =
+        Number.isFinite(Number(r.GA)) && gpRaw > 0
+          ? applyAdj(r, "GA", Number(r.GA) * gpRaw)
+          : NaN;
 
-        if (uiStat === "SV%") {
-          const svp = readSvPct(r); // 0..1
-          if (Number.isFinite(svp)) o["SV%"] = applyAdj(r, "SV%", svp);
-          continue;
-        }
+      // Copy counting stats requested by user
+      if (gKeysUI.includes("SV") && Number.isFinite(svTot)) o.SV = svTot;
+      if (gKeysUI.includes("GA") && Number.isFinite(gaTot)) o.GA = gaTot;
 
-        if (uiStat === "GAA") {
-          const gaa = Number(r.GA); // GA per game in your JSON
-          if (Number.isFinite(gaa)) o["GAA"] = applyAdj(r, "GAA", gaa);
-          continue;
-        }
+      if (gKeysUI.includes("W") && Number.isFinite(Number(r.W)) && gpRaw > 0)
+        o.W = applyAdj(r, "W", Number(r.W) * gpRaw);
+      if (gKeysUI.includes("L") && Number.isFinite(Number(r.L)) && gpRaw > 0)
+        o.L = applyAdj(r, "L", Number(r.L) * gpRaw);
+      if (
+        gKeysUI.includes("OTL") &&
+        Number.isFinite(Number(r.OTL)) &&
+        gpRaw > 0
+      )
+        o.OTL = applyAdj(r, "OTL", Number(r.OTL) * gpRaw);
+      if (gKeysUI.includes("SO") && Number.isFinite(Number(r.SO)) && gpRaw > 0)
+        o.SO = applyAdj(r, "SO", Number(r.SO) * gpRaw);
 
-        // Counting stats assumed per-game → season total via raw GP, then ADJ
-        const alias = GOALIE_ALIASES[uiStat] || { key: uiStat };
-        let vpg = Number(r[alias.key]);
-        if (!Number.isFinite(vpg)) continue;
+      // GP/GS are season totals straight from GP; never ADJ.
+      if (gKeysUI.includes("GP") && Number.isFinite(gpRaw)) o.GP = gpRaw;
+      if (gKeysUI.includes("GS") && Number.isFinite(gpRaw)) o.GS = gpRaw;
 
-        const total = gpRaw > 0 ? vpg * gpRaw : NaN;
-        if (Number.isFinite(total)) o[uiStat] = applyAdj(r, uiStat, total);
+      // Rebuild rates from ADJ'ed counts
+      if (gKeysUI.includes("SV%")) {
+        const denom =
+          (Number.isFinite(svTot) ? svTot : 0) +
+          (Number.isFinite(gaTot) ? gaTot : 0);
+        if (denom > 0) o["SV%"] = svTot / denom; // ADJ cancels here
+      }
+      if (gKeysUI.includes("GAA")) {
+        if (Number.isFinite(gaTot) && gpRaw > 0) o.GAA = gaTot / gpRaw;
       }
 
       return o;
@@ -500,7 +430,7 @@ export function useFPMap() {
 
     const gTables = buildZTablesFromTotals(gRawList, gKeysUI);
 
-    // --- Skater loop (z on season totals built above)
+    // Skater loop (z on season totals built above)
     for (let i = 0; i < skaters.length; i++) {
       const r = skaters[i];
       const gpEff = effectiveGP(r, settings.useProjectedGP); // only for FPG display
@@ -520,7 +450,7 @@ export function useFPMap() {
       };
     }
 
-    // --- Goalie loop (use NEG_GOALIE for L/GA/GAA flip)
+    // Goalie loop (use NEG_GOALIE for L/GA/GAA flip)
     for (let i = 0; i < goalies.length; i++) {
       const r = goalies[i];
       const gpEff = effectiveGP(r, settings.useProjectedGP); // only for FPG display

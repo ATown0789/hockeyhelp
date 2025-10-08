@@ -37,32 +37,71 @@ export default function SettingsPanel() {
   const go = settings.goalieWeights || {};
 
   // Update handlers
-  const updateSkater = (k, val) =>
-    setSettings({
-      ...settings,
-      skaterWeights: { ...sk, [k]: Number(val) || 0 },
-    });
+  const updateSkater = (k, val) => {
+    const v = Number(val) || 0;
+    const nextActive = { ...sk, [k]: v };
 
-  const updateGoalie = (k, val) =>
+    const skCacheKey =
+      settings.scoringMode === "categories"
+        ? "skaterWeightsCats"
+        : "skaterWeightsPoints";
+
+    const currentCache =
+      settings[skCacheKey] ||
+      (settings.scoringMode === "categories"
+        ? DEFAULT_SKATER_CATS
+        : DEFAULT_SKATER_POINTS);
+
     setSettings({
       ...settings,
-      goalieWeights: { ...go, [k]: Number(val) || 0 },
+      skaterWeights: nextActive,
+      [skCacheKey]: { ...currentCache, [k]: v },
     });
+  };
+
+  const updateGoalie = (k, val) => {
+    const v = Number(val) || 0;
+    const nextActive = { ...go, [k]: v };
+
+    const goCacheKey =
+      settings.scoringMode === "categories"
+        ? "goalieWeightsCats"
+        : "goalieWeightsPoints";
+
+    const currentCache =
+      settings[goCacheKey] ||
+      (settings.scoringMode === "categories"
+        ? DEFAULT_GOALIE_CATS
+        : DEFAULT_GOALIE_POINTS);
+
+    setSettings({
+      ...settings,
+      goalieWeights: nextActive,
+      [goCacheKey]: { ...currentCache, [k]: v },
+    });
+  };
 
   // Switch modes & load that mode's defaults
   const changeMode = (mode) => {
-    const next =
-      mode === "categories"
-        ? {
-            skaterWeights: { ...DEFAULT_SKATER_CATS },
-            goalieWeights: { ...DEFAULT_GOALIE_CATS },
-          }
-        : {
-            skaterWeights: { ...DEFAULT_SKATER_POINTS },
-            goalieWeights: { ...DEFAULT_GOALIE_POINTS },
-          };
+    const skCacheKey =
+      mode === "categories" ? "skaterWeightsCats" : "skaterWeightsPoints";
+    const goCacheKey =
+      mode === "categories" ? "goalieWeightsCats" : "goalieWeightsPoints";
 
-    setSettings({ ...settings, scoringMode: mode, ...next });
+    // If we have a cached set for this mode, use it; otherwise seed with that mode's defaults.
+    const nextSk =
+      settings[skCacheKey] ||
+      (mode === "categories" ? DEFAULT_SKATER_CATS : DEFAULT_SKATER_POINTS);
+    const nextGo =
+      settings[goCacheKey] ||
+      (mode === "categories" ? DEFAULT_GOALIE_CATS : DEFAULT_GOALIE_POINTS);
+
+    setSettings({
+      ...settings,
+      scoringMode: mode,
+      skaterWeights: { ...nextSk },
+      goalieWeights: { ...nextGo },
+    });
   };
 
   return (
