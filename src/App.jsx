@@ -1,24 +1,62 @@
 import React, { useEffect, useMemo, useState } from "react";
+
+/* ===== Data & Hooks ===== */
 import NHL_SCHEDULE from "./data/schedule";
 import { useFPMap } from "./fp-map";
+import { useSettings } from "./settings";
+
+/* ===== UI Components ===== */
 import SettingsPanel from "./SettingsPanel";
 import GameStrip from "./GameStrip";
 
-const DEFAULT_SLOTS = { C: 2, LW: 2, RW: 2, D: 4, G: 2, UTIL: 2 };
-const SLOT_KEYS = ["C", "LW", "RW", "D", "G", "UTIL"];
+/* ===== Opponent Strength ===== */
+import {
+  buildOpponentWeaknessMap,
+  getOpponent,
+  adjustFPForOpponent,
+} from "./strength-metrics";
 
+/* ===== Constants ===== */
+const DEFAULT_SLOTS = { C: 2, LW: 2, RW: 2, D: 4, G: 2, UTIL: 2 };
+const SLOT_KEYS = ["C", "LW", "RW", "D", "UTIL", "G"];
+
+/* =============================================================================
+   Helpers
+============================================================================= */
 function keyName(name) {
-  return name
+  return String(name)
     .toLowerCase()
     .replace(/[^a-z\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
-function teamsPlayingOn(date) {
-  return new Set((NHL_SCHEDULE[date]?.teams ?? []).map((t) => t.toUpperCase()));
+
+// Returns "YYYY-MM-DD" in America/Chicago
+function todayKeyCT() {
+  const fmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  // en-CA gives YYYY-MM-DD
+  return fmt.format(new Date());
 }
+
+function normalizeTeam(t) {
+  return String(t || "")
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "");
+}
+
+function teamsPlayingOn(date) {
+  return new Set(
+    (NHL_SCHEDULE[date]?.teams ?? []).map((t) => normalizeTeam(t))
+  );
+}
+
 function parseRosterText(text, FP_MAP) {
-  const lines = text
+  const lines = String(text)
     .replace(/\r\n?/g, "\n")
     .split("\n")
     .map((l) => l.trim())
@@ -28,7 +66,7 @@ function parseRosterText(text, FP_MAP) {
     const p = line.split(",").map((s) => s.trim());
     const name = p[0] || "";
     const fp = FP_MAP[keyName(name)];
-    const team = (p[1] || fp?.team || "").toUpperCase();
+    const team = normalizeTeam(p[1] || fp?.team || "");
     const posStr = p[2] || (fp?.positions ?? []).join("/");
     return {
       raw: line,
@@ -39,61 +77,27 @@ function parseRosterText(text, FP_MAP) {
     };
   });
 }
-function optimizeStarters(date, roster, slots) {
-  const playing = roster.filter(
-    (p) => p.team && teamsPlayingOn(date).has(p.team)
-  );
-  const notPlaying = roster.filter(
-    (p) => !p.team || !teamsPlayingOn(date).has(p.team)
-  );
 
-  const used = new Set();
-  const starters = { C: [], LW: [], RW: [], D: [], G: [], UTIL: [] };
-  const take = (pos, n, elig) => {
-    for (let i = 0; i < n; i++) {
-      const cand = playing
-        .filter((p) => !used.has(p.name) && elig(p))
-        .sort((a, b) => b.fp - a.fp);
-      if (!cand.length) break;
-      used.add(cand[0].name);
-      starters[pos].push(cand[0]);
-    }
-  };
-  const is = (p, t) => p.positions.includes(t);
-  take("C", slots.C, (p) => is(p, "C"));
-  take("LW", slots.LW, (p) => is(p, "LW"));
-  take("RW", slots.RW, (p) => is(p, "RW"));
-  take("D", slots.D, (p) => is(p, "D"));
-  take("G", slots.G, (p) => is(p, "G"));
-  take(
-    "UTIL",
-    slots.UTIL,
-    (p) => ["C", "LW", "RW", "D"].some((k) => is(p, k)) && !is(p, "G")
-  );
-  const bench = playing
-    .filter((p) => !used.has(p.name))
-    .sort((a, b) => b.fp - a.fp);
-  return { starters, bench, notPlaying };
-}
 function pretty(n) {
-  if (n == null || Number.isNaN(Number(n))) return "0.0000";
+  if (n == null || Number.isNaN(Number(n))) return "0.0";
   return Number(n).toLocaleString(undefined, {
     minimumFractionDigits: 1,
     maximumFractionDigits: 1,
   });
 }
 
-// --- helpers for games strip ---
+/* --- Games strip helpers --- */
 function timeOnlyCT(startCT) {
-  // startCT from converter looks like: "YYYY-MM-DD 7:00 PM CT"
+  // startCT looks like: "YYYY-MM-DD 7:00 PM CT"
   if (!startCT) return "";
   const parts = String(startCT).split(" ");
   return parts.length >= 4 ? parts.slice(1).join(" ") : startCT;
 }
+
 function onlyNetworkNames(list) {
-  // Safety if schedule still contains qualifiers — strip common tags
+  // Strip qualifiers like (National), (Home), HD, etc.
   const rm =
-    /\\b(home|away|national|regional|internet|web|stream|radio|intl)\\b/i;
+    /\b(home|away|national|regional|internet|web|stream|radio|intl)\b/i;
   return [
     ...new Set(
       (list || [])
@@ -101,29 +105,260 @@ function onlyNetworkNames(list) {
         .map((s) =>
           s
             .replace(
-              /\\((?:home|away|national|regional|internet|web|stream|radio|intl)\\)/gi,
-              ""
-            ) // remove (National) etc
-            .replace(
-              /\\s*-\\s*(home|away|national|regional|internet|web|stream|radio|intl)\\b/gi,
+              /\((?:home|away|national|regional|internet|web|stream|radio|intl)\)/gi,
               ""
             )
-            .replace(/\\bHD\\b/gi, "")
-            .replace(/\\s{2,}/g, " ")
+            .replace(
+              /\s*-\s*(home|away|national|regional|internet|web|stream|radio|intl)\b/gi,
+              ""
+            )
+            .replace(/\bHD\b/gi, "")
+            .replace(/\s{2,}/g, " ")
             .trim()
         )
-        .filter((s) => s && !rm.test(s)) // drop pure qualifier tokens
+        .filter((s) => s && !rm.test(s))
     ),
   ];
 }
 
+/* =============================================================================
+   Core: optimize starters (now opponent-aware)
+============================================================================= */
+function canPlaySlot(p, slot) {
+  if (slot === "G") return p.positions.includes("G");
+  if (slot === "UTIL") return !p.positions.includes("G");
+  return p.positions.includes(slot);
+}
+
+function listSlots(slots) {
+  const arr = [];
+  for (const k of ["C", "LW", "RW", "D", "G", "UTIL"]) {
+    for (let i = 0; i < slots[k]; i++) arr.push(k);
+  }
+  return arr;
+}
+
+function lowestInSlot(starters, slot) {
+  const list = starters[slot];
+  if (!list?.length) return null;
+  let idx = 0;
+  let min = list[0].adjFP ?? list[0].fp ?? -Infinity;
+  for (let i = 1; i < list.length; i++) {
+    const v = list[i].adjFP ?? list[i].fp ?? -Infinity;
+    if (v < min) {
+      min = v;
+      idx = i;
+    }
+  }
+  return { idx, player: list[idx], val: min };
+}
+
+/** Try to place `benchP` by possibly bumping a weaker starter and
+ *  recursively relocating the bumped player into another eligible slot.
+ *  Depth-limited DFS so it stays fast & safe in the browser.
+ */
+
+function tryPromote(benchP, starters, slots, depth = 0, maxDepth = 6) {
+  // Consider all slots benchP can play (UTIL counts if skater)
+  const eligSlots = Object.keys(slots).filter((s) => canPlaySlot(benchP, s));
+
+  for (const s of eligSlots) {
+    const cap = slots[s];
+    const list = starters[s];
+
+    // 1) If there's room, just put them in.
+    if (list.length < cap) {
+      list.push(benchP);
+      return true;
+    }
+
+    // 2) Otherwise, see if they beat the weakest in that slot.
+    const weakest = lowestInSlot(starters, s);
+    const benchVal = benchP.adjFP ?? benchP.fp ?? -Infinity;
+
+    // 2.5) Two-hop improvement even if benchVal <= weakest.val
+    if (weakest) {
+      const bumped = weakest.player;
+      const bumpedVal = bumped.adjFP ?? bumped.fp ?? -Infinity;
+
+      // Where else can the bumped player go?
+      const rehomeSlots = Object.keys(slots).filter(
+        (t) => t !== s && canPlaySlot(bumped, t)
+      );
+
+      for (const t of rehomeSlots) {
+        const listT = starters[t];
+        const capT = slots[t];
+
+        // If t has room, we'd have placed earlier; skip
+        if (listT.length < capT) continue;
+
+        const weakestT = lowestInSlot(starters, t);
+        if (!weakestT) continue;
+
+        // Net gain if we (a) put benchP into s and (b) move bumped into t, replacing weakestT
+        const gain = benchVal - weakest.val + (bumpedVal - weakestT.val);
+
+        if (gain > 0) {
+          // Apply the two-hop swap
+          list.splice(weakest.idx, 1, benchP); // benchP into s
+          listT.splice(weakestT.idx, 1, bumped); // bumped into t (kicks weakestT)
+          return true;
+        }
+      }
+    }
+
+    if (weakest && benchVal > weakest.val) {
+      const bumped = weakest.player;
+
+      // Tentatively replace
+      list.splice(weakest.idx, 1, benchP);
+
+      if (depth >= maxDepth) {
+        // no more room to shuffle → revert and skip
+        list.splice(weakest.idx, 1, bumped);
+      } else {
+        // Try to re-home the bumped player in some other slot (including UTIL if allowed)
+        const otherSlots = Object.keys(slots).filter(
+          (t) => t !== s && canPlaySlot(bumped, t)
+        );
+
+        for (const t of otherSlots) {
+          const capT = slots[t];
+          const listT = starters[t];
+
+          // (a) if room → done
+          if (listT.length < capT) {
+            listT.push(bumped);
+            return true;
+          }
+
+          // (b) recursive bumping
+          const weakestT = lowestInSlot(starters, t);
+          const bumpedVal = bumped.adjFP ?? bumped.fp ?? -Infinity;
+
+          if (weakestT && bumpedVal > weakestT.val) {
+            const bumped2 = weakestT.player;
+            listT.splice(weakestT.idx, 1, bumped);
+
+            // recursively try to place bumped2
+            if (tryPromote(bumped2, starters, slots, depth + 1, maxDepth)) {
+              return true;
+            }
+
+            // revert if that didn’t pan out
+            listT.splice(weakestT.idx, 1, weakestT.player);
+          }
+        }
+
+        // Couldn’t re-home bumped → revert original replacement
+        list.splice(weakest.idx, 1, bumped);
+      }
+    }
+  }
+
+  return false;
+}
+
+function optimizeStarters(date, roster, slots, weaknessMap, maxBoost = 0.1) {
+  const playingTeams = teamsPlayingOn(date);
+  const rawPlaying = roster.filter((p) => p.team && playingTeams.has(p.team));
+  const notPlaying = roster.filter((p) => !p.team || !playingTeams.has(p.team));
+
+  // Enrich with opponent + adj
+  const playing = rawPlaying.map((p) => {
+    const opponent = getOpponent(date, p.team);
+    const adjFP = adjustFPForOpponent(
+      p.fp ?? 0,
+      opponent,
+      weaknessMap,
+      maxBoost
+    );
+    return { ...p, opponent, adjFP };
+  });
+
+  const used = new Set();
+  const starters = { C: [], LW: [], RW: [], D: [], G: [], UTIL: [] };
+
+  // 1) Global best-first fill
+  const sorted = [...playing].sort(
+    (a, b) => (b.adjFP ?? b.fp) - (a.adjFP ?? a.fp)
+  );
+  for (const p of sorted) {
+    // main slots first
+    let placed = false;
+    for (const pos of ["C", "LW", "RW", "D", "G"]) {
+      if (!canPlaySlot(p, pos)) continue;
+      if (starters[pos].length < slots[pos]) {
+        starters[pos].push(p);
+        used.add(p.name);
+        placed = true;
+        break;
+      }
+    }
+    if (
+      !placed &&
+      canPlaySlot(p, "UTIL") &&
+      starters.UTIL.length < slots.UTIL
+    ) {
+      starters.UTIL.push(p);
+      used.add(p.name);
+    }
+  }
+
+  // 2) Try to promote strong bench guys via short swap chains
+  const bench = playing
+    .filter((p) => !used.has(p.name))
+    .sort((a, b) => (b.adjFP ?? b.fp) - (a.adjFP ?? a.fp));
+
+  for (const b of bench) {
+    if (tryPromote(b, starters, slots, 0, 3)) {
+      used.add(b.name);
+    }
+  }
+
+  // Rebuild bench after promotions
+  const benchFinal = playing
+    .filter((p) => !Object.values(starters).some((arr) => arr.includes(p)))
+    .sort((a, b) => (b.adjFP ?? b.fp) - (a.adjFP ?? a.fp));
+
+  return { starters, bench: benchFinal, notPlaying };
+}
+
+/* =============================================================================
+   Component
+============================================================================= */
 export default function App() {
   const FP_MAP = useFPMap();
-  const dateKeys = Object.keys(NHL_SCHEDULE).sort();
-  const [dateIndex, setDateIndex] = useState(0);
-  const date = dateKeys[dateIndex] ?? dateKeys[0] ?? "2025-10-07";
-  const [showSettings, setShowSettings] = useState(false);
+  const { settings } = useSettings();
 
+  /* --- Date state --- */
+  const dateKeys = Object.keys(NHL_SCHEDULE).sort();
+  const today = todayKeyCT();
+
+  const exactIdx = dateKeys.findIndex((k) => k === today);
+  const nextIdx = dateKeys.findIndex((k) => k >= today);
+  const initialIndex =
+    exactIdx !== -1
+      ? exactIdx
+      : nextIdx !== -1
+      ? nextIdx
+      : Math.max(0, dateKeys.length - 1);
+
+  const [dateIndex, setDateIndex] = useState(initialIndex);
+  const date = dateKeys[dateIndex] ?? dateKeys[0] ?? "2025-10-07";
+
+  /* --- UI state --- */
+  const [showSettings, setShowSettings] = useState(false);
+  const [useOpponentWeakness, setUseOpponentWeakness] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("useOpponentWeakness") ?? "true");
+    } catch {
+      return true;
+    }
+  });
+
+  /* --- Slot config --- */
   const [slots, setSlots] = useState(() => {
     try {
       const saved = localStorage.getItem("slot-config");
@@ -133,7 +368,18 @@ export default function App() {
     }
   });
 
-  // Built-in default roster (used only if nothing saved yet)
+  const bump = (k, d) => {
+    const limits = { D: 8, G: 3, default: 4 };
+    const max = k in limits ? limits[k] : limits.default;
+    const v = Math.max(0, Math.min(max, (slots[k] ?? 0) + d));
+    const next = { ...slots, [k]: v };
+    setSlots(next);
+    try {
+      localStorage.setItem("slot-config", JSON.stringify(next));
+    } catch {}
+  };
+
+  /* --- Roster --- */
   const BUILT_IN_ROSTER = [
     "Brayden Point,TBL,C",
     "Jack Hughes,NJ,C/LW",
@@ -157,7 +403,6 @@ export default function App() {
     "Linus Ullmark,OTT,G",
   ].join("\n");
 
-  // Load once from localStorage (fallback to built-in)
   const [rosterText, setRosterText] = useState(() => {
     try {
       return localStorage.getItem("userRoster") || BUILT_IN_ROSTER;
@@ -166,22 +411,57 @@ export default function App() {
     }
   });
 
-  // Persist roster changes automatically
+  // Persist roster automatically
   useEffect(() => {
     try {
       localStorage.setItem("userRoster", rosterText);
     } catch {}
   }, [rosterText]);
 
+  /* --- Opponent weakness map (rebuilds if user changes weights) --- */
+  const WEAKNESS = useMemo(
+    () =>
+      buildOpponentWeaknessMap({
+        skaterWeights: settings.skaterWeights,
+        goalieWeights: settings.goalieWeights,
+        useSkaters: true,
+        useGoalies: true,
+      }),
+    [settings.skaterWeights, settings.goalieWeights]
+  );
+
+  // --- TEMP DEBUG: Log opponent difficulty table in console ---
+  useEffect(() => {
+    if (!WEAKNESS) return;
+    const sorted = Object.entries(WEAKNESS)
+      .sort((a, b) => b[1] - a[1])
+      .map(([team, val], i) => ({
+        Team: team,
+        Weakness: val.toFixed(3),
+      }));
+    console.table(sorted);
+  }, [WEAKNESS]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "useOpponentWeakness",
+        JSON.stringify(useOpponentWeakness)
+      );
+    } catch {}
+  }, [useOpponentWeakness]);
+
+  /* --- Derived data --- */
   const parsed = useMemo(
     () => parseRosterText(rosterText, FP_MAP),
     [rosterText, FP_MAP]
   );
+
   const result = useMemo(
-    () => optimizeStarters(date, parsed, slots),
-    [date, parsed, slots]
+    () => optimizeStarters(date, parsed, slots, WEAKNESS, 0.1),
+    [date, parsed, slots, WEAKNESS, useOpponentWeakness]
   );
-  // Set of team abbreviations from your current roster
+
   const rosterTeams = useMemo(
     () => new Set(parsed.map((p) => p.team).filter(Boolean)),
     [parsed]
@@ -190,17 +470,9 @@ export default function App() {
   const playingCount = parsed.filter((p) =>
     teamsPlayingOn(date).has(p.team)
   ).length;
-  const totalNeeded = SLOT_KEYS.reduce((acc, k) => acc + slots[k], 0);
+  const totalNeeded = SLOT_KEYS.reduce((acc, k) => acc + (slots[k] || 0), 0);
 
-  const bump = (k, d) => {
-    const max = k === "D" ? 8 : k === "G" ? 3 : 4;
-    const v = Math.max(0, Math.min(max, slots[k] + d));
-    const next = { ...slots, [k]: v };
-    setSlots(next);
-    localStorage.setItem("slot-config", JSON.stringify(next));
-  };
-
-  // Normalize games for UI
+  /* --- Normalize games for UI --- */
   const rawGames = NHL_SCHEDULE[date]?.games ?? [];
   const normGames = rawGames.map((g) =>
     Array.isArray(g)
@@ -224,16 +496,21 @@ export default function App() {
   const teams = NHL_SCHEDULE[date]?.teams ?? [];
   const gameCount = normGames.length;
 
+  /* =============================================================================
+     Render
+  ============================================================================= */
   return (
     <div className="container">
+      {/* Header */}
       <div className="header">
         <div>
           <h1 className="h1">Fantasy Start Optimizer</h1>
           <div className="sub">
             Game-day view • Highlights your teams • Auto-starts best FP at each
-            slot • Adjustable position counts <br />
-            Fantasy Points (FP) is from The Athletic’s pre-season projections
-            based on Dom Luszczyszyn's model.
+            slot • Adjustable position counts
+            <br />
+            Fantasy Points (FP) from The Athletic’s pre-season projections (Dom
+            Luszczyszyn’s model).
           </div>
         </div>
 
@@ -261,7 +538,6 @@ export default function App() {
             ▶
           </button>
 
-          {/* NEW: Settings toggle */}
           <button
             className="ghost"
             onClick={() => setShowSettings((s) => !s)}
@@ -273,7 +549,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* NEW: slide-in-ish panel container */}
+      {/* Settings */}
       {showSettings && (
         <div
           style={{
@@ -283,11 +559,14 @@ export default function App() {
             background: "rgba(0,0,0,0.25)",
           }}
         >
-          <SettingsPanel />
+          <SettingsPanel
+            useOpponentWeakness={useOpponentWeakness}
+            setUseOpponentWeakness={setUseOpponentWeakness}
+          />
         </div>
       )}
 
-      {/* Games strip across the top */}
+      {/* Games Strip */}
       {normGames.length === 0 ? (
         <div className="gameCard muted">No games listed.</div>
       ) : (
@@ -322,8 +601,9 @@ export default function App() {
         </GameStrip>
       )}
 
+      {/* Main Grid */}
       <div className="grid">
-        {/* Left column */}
+        {/* Left: Inputs */}
         <div style={{ display: "grid", gap: 16 }}>
           <section className="card">
             <div className="cardTitle">Your Roster</div>
@@ -370,7 +650,8 @@ export default function App() {
                         className="progressFill"
                         style={{
                           width: `${
-                            (slots[k] / (k === "D" ? 8 : k === "G" ? 3 : 4)) *
+                            ((slots[k] || 0) /
+                              (k === "D" ? 8 : k === "G" ? 3 : 4)) *
                             100
                           }%`,
                         }}
@@ -410,7 +691,7 @@ export default function App() {
           </section>
         </div>
 
-        {/* Right column */}
+        {/* Right: Outputs */}
         <div style={{ display: "grid", gap: 16 }}>
           <section className="card sectionStarters">
             <div className="cardTitle">Starters</div>
@@ -442,12 +723,25 @@ export default function App() {
                         <div style={{ fontWeight: 600 }}>{p.name}</div>
                         <div className="muted">
                           {p.team} • {p.positions.join("/")}
+                          {p.opponent ? `  •  vs ${p.opponent}` : ""}
                         </div>
                       </div>
-                      <div>
-                        FP {pretty(p.fp)}
-                        {p.fpg ? `  •  FP/GP ${pretty(p.fpg)}` : ""}
-                      </div>
+                      {useOpponentWeakness && p.adjFP != null ? (
+                        <div className="statColumns">
+                          <div className="col">
+                            <div className="label">FP</div>
+                            <div className="value">{pretty(p.fp)}</div>
+                          </div>
+                          <div className="col">
+                            <div className="label">Adj FP</div>
+                            <div className="value">{pretty(p.adjFP)}</div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={{ textAlign: "right" }}>
+                          FP {pretty(p.fp)}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -475,7 +769,22 @@ export default function App() {
                         {p.team} • {p.positions.join("/")}
                       </div>
                     </div>
-                    <div>FP {pretty(p.fp)}</div>
+                    {useOpponentWeakness && p.adjFP != null ? (
+                      <div className="statColumns">
+                        <div className="col">
+                          <div className="label">FP</div>
+                          <div className="value">{pretty(p.fp)}</div>
+                        </div>
+                        <div className="col">
+                          <div className="label">Adj FP</div>
+                          <div className="value">{pretty(p.adjFP)}</div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ textAlign: "right" }}>
+                        FP {pretty(p.fp)}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

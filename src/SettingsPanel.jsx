@@ -29,7 +29,11 @@ const SKATER_KEYS = [
 ];
 const GOALIE_KEYS = ["W", "L", "OTL", "SO", "SV", "SV%", "GA", "GAA", "GS"];
 
-export default function SettingsPanel() {
+export default function SettingsPanel({
+  useOpponentWeakness,
+  setUseOpponentWeakness,
+  ...props
+}) {
   const { settings, setSettings } = useSettings();
   const isPoints = settings.scoringMode === "points";
 
@@ -136,6 +140,17 @@ export default function SettingsPanel() {
           }
         />
         Projected Games Played (uncheck to set all to 82 projected games played)
+      </label>
+
+      {/* Team Weakness ADJ*/}
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input
+          id="toggle-weakness"
+          type="checkbox"
+          checked={useOpponentWeakness}
+          onChange={(e) => setUseOpponentWeakness(e.target.checked)}
+        />
+        Apply matchup bump (opponent weakness)
       </label>
 
       {/* Skater weights */}

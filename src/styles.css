@@ -273,3 +273,28 @@ body {
   color: var(--text);
   transition: background 0.25s ease, border-color 0.25s ease;
 }
+
+.statColumns {
+  display: flex;
+  justify-content: flex-end;
+  gap: 1.25rem; /* space between FP and Adj FP columns */
+  text-align: center;
+  line-height: 1.1;
+}
+
+.statColumns .col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 2.5rem; /* ensures clean spacing in grids */
+}
+
+.statColumns .label {
+  font-size: 0.75em;
+  opacity: 0.7;
+}
+
+.statColumns .value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
